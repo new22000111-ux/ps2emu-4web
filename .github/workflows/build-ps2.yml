@@ -1,0 +1,125 @@
+name: Build PS2 Web
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout pinned Play source
+        uses: actions/checkout@v4
+        with:
+          repository: jpd002/Play-
+          ref: 83700b2c31e593bc94e845b4b31b797be84dda59
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Emscripten
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 4.0.1
+
+      - name: Install Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure WASM
+        run: emcmake cmake --preset wasm-ninja
+
+      - name: Build Play Release
+        run: |
+          cmake --build --preset wasm-ninja-release \
+            --target Play --parallel 2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.17.0'
+
+      - name: Copy emulator into web app
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/build_cmake/build/wasm-ninja/Source/ui_js/Release"
+
+          test -s "$OUT/Play.js"
+          test -s "$OUT/Play.wasm"
+
+          cp "$OUT/Play.js" js/play_browser/src/Play.js
+          cp "$OUT/Play.js" js/play_browser/public/Play.js
+          cp "$OUT/Play.wasm" js/play_browser/public/Play.wasm
+
+          # Preserve separate worker scripts if this build emits any.
+          find "$OUT" -maxdepth 1 -type f -name '*.worker.*' \
+            -exec cp {} js/play_browser/public/ \;
+
+      - name: Build website
+        working-directory: js/play_browser
+        env:
+          GENERATE_SOURCEMAP: 'false'
+        run: |
+          export REACT_APP_VERSION="$(git describe --always --tags)"
+          npm install
+          npm run build
+
+      - name: Package source details for next optimization step
+        shell: bash
+        run: |
+          mkdir -p port-details
+          git rev-parse HEAD > port-details/revision.txt
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          names = [
+              "CMakePresets.json",
+              "js/play_browser/config-overrides.js",
+              "js/play_browser/src/App.tsx",
+              "js/play_browser/src/Actions.ts",
+              "js/play_browser/src/DiscImageDevice.ts",
+              "js/play_browser/src/PlayModule.ts",
+              "Source/Js_DiscImageDeviceStream.cpp",
+              "Source/Js_DiscImageDeviceStream.h",
+              "Source/ui_js/Main.cpp",
+              "Source/ui_js/Ps2VmJs.cpp",
+              "Source/ui_js/Ps2VmJs.h",
+              "Source/ui_js/InputProviderEmscripten.cpp",
+          ]
+
+          text = []
+          for name in names:
+              p = Path(name)
+              text.append("\n=== " + name + " ===\n")
+              text.append(
+                  p.read_text(encoding="utf-8", errors="replace")
+                  if p.is_file() else "NOT FOUND\n"
+              )
+
+          Path("port-details/interface.txt").write_text(
+              "\n".join(text), encoding="utf-8"
+          )
+          PY
+
+      - name: Upload website
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps2-web
+          path: js/play_browser/build/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload interface details
+        uses: actions/upload-artifact@v4
+        with:
+          name: port-details
+          path: port-details/
+          if-no-files-found: error
+          retention-days: 14
